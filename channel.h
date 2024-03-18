@@ -30,6 +30,12 @@ typedef struct {
 
     /* ADD ANY STRUCT ENTRIES YOU NEED HERE */
     /* IMPLEMENT THIS */
+    pthread_mutex_t mutex;
+    pthread_mutex_t select_mutex;
+    pthread_cond_t cond_full;
+    pthread_cond_t cond_empty;
+    bool is_closed;
+    list_t* semaphore_select_list;
 } channel_t;
 
 // Defines channel list structure for channel_select function
