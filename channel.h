@@ -36,6 +36,9 @@ typedef struct {
     pthread_cond_t cond_empty;
     bool is_closed;
     list_t* semaphore_select_list;
+    int unbuffered_operation;
+    int unbuffered_stage;
+    int unbuffered;
 } channel_t;
 
 // Defines channel list structure for channel_select function

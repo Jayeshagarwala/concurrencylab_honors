@@ -1,5 +1,11 @@
 #include "channel.h"
 
+#define UNBUFFERED 1
+#define BUFFERED 0
+#define UNBUFFERED_SEND 0
+#define UNBUFFERED_RECEIVE 1
+#define NO_UNBUFFERED_OPERATION -1
+
 // Creates a new channel with the provided size and returns it to the caller
 channel_t* channel_create(size_t size)
 {
@@ -14,6 +20,9 @@ channel_t* channel_create(size_t size)
     pthread_cond_init(&channel->cond_empty, NULL);
     channel->is_closed = false;
     channel->semaphore_select_list = list_create();
+    channel->unbuffered_operation = NO_UNBUFFERED_OPERATION;
+    channel->unbuffered_stage = 0;
+    channel->unbuffered = (size == 0) ? UNBUFFERED : BUFFERED;
 
     return channel;
 }
@@ -59,29 +68,64 @@ enum channel_status channel_send(channel_t *channel, void* data)
         return CLOSED_ERROR;
     }
 
-    while(buffer_add(channel->buffer, data) == BUFFER_ERROR)
+    if(channel->unbuffered)
     {
-        if (channel->is_closed)
+        if (channel->unbuffered_stage == 0)
         {
+            channel->unbuffered_stage = 1;
+            channel->unbuffered_operation = UNBUFFERED_SEND;  
+            channel->buffer->data = data;
+            pthread_cond_wait(&channel->cond_full, &channel->mutex);
+            channel->unbuffered_stage = 0;
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
                 return GENERIC_ERROR;
             }
-            return CLOSED_ERROR;
+            return SUCCESS;
+            
         }
-        pthread_cond_wait(&channel->cond_full, &channel->mutex);
+        else if(channel->unbuffered_stage == 1)
+        {
+            if(channel->unbuffered_operation == UNBUFFERED_RECEIVE)
+            {
+                channel->buffer->data = data;   
+                if(pthread_mutex_unlock(&channel->mutex) != 0)
+                {
+                    return GENERIC_ERROR;
+                }
+                pthread_cond_signal(&channel->cond_empty);
+                return SUCCESS;
+            }
+            
+        }
     }
-
-    if(pthread_mutex_unlock(&channel->mutex) != 0)
+    else
     {
-        return GENERIC_ERROR;
+
+        while(buffer_add(channel->buffer, data) == BUFFER_ERROR)
+        {
+            if (channel->is_closed)
+            {
+                if(pthread_mutex_unlock(&channel->mutex) != 0)
+                {
+                    return GENERIC_ERROR;
+                }
+                return CLOSED_ERROR;
+            }
+            pthread_cond_wait(&channel->cond_full, &channel->mutex);
+        }
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        signal_semaphore_select(channel);
+        pthread_cond_signal(&channel->cond_empty);
+        
+        return SUCCESS;
     }
-
-    signal_semaphore_select(channel);
-    pthread_cond_signal(&channel->cond_empty);
-    
-
-    return SUCCESS;
+    return GENERIC_ERROR;
 }
 
 // Reads data from the given channel and stores it in the function's input parameter, data (Note that it is a double pointer)
@@ -108,30 +152,64 @@ enum channel_status channel_receive(channel_t* channel, void** data)
         return CLOSED_ERROR;
     }
 
-    while(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
+    if(channel->unbuffered)
     {
-
-        if (channel->is_closed)
+        if (channel->unbuffered_stage == 0)
         {
+            channel->unbuffered_stage = 1;
+            channel->unbuffered_operation = UNBUFFERED_RECEIVE;
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
+            channel->unbuffered_stage = 0;
+            *data = channel->buffer->data;
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
                 return GENERIC_ERROR;
             }
-            return CLOSED_ERROR;
+            return SUCCESS;
+        }
+        else if(channel->unbuffered_stage == 1)
+        {
+            if (channel->unbuffered_operation == UNBUFFERED_SEND)
+            {
+                *data = channel->buffer->data;
+                if(pthread_mutex_unlock(&channel->mutex) != 0)
+                {
+                    return GENERIC_ERROR;
+                }
+                pthread_cond_signal(&channel->cond_full);
+                return SUCCESS;
+            }
+     
+        }
+    }
+    else
+    {
+        while(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
+        {
+
+            if (channel->is_closed)
+            {
+                if(pthread_mutex_unlock(&channel->mutex) != 0)
+                {
+                    return GENERIC_ERROR;
+                }
+                return CLOSED_ERROR;
+            }
+
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
         }
 
-        pthread_cond_wait(&channel->cond_empty, &channel->mutex);
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        signal_semaphore_select(channel);
+        pthread_cond_signal(&channel->cond_full);
+
+        return SUCCESS;
     }
-
-    if(pthread_mutex_unlock(&channel->mutex) != 0)
-    {
-        return GENERIC_ERROR;
-    }
-
-    signal_semaphore_select(channel);
-    pthread_cond_signal(&channel->cond_full);
-
-    return SUCCESS;
+    return GENERIC_ERROR;
 }
 
 // Writes data to the given channel
