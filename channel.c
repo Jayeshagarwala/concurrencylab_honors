@@ -47,6 +47,7 @@ void signal_semaphore_select(channel_t* channel)
 
 enum channel_status unbuffered_sync(channel_t* channel, int operation, void* data)
 {
+    // stage 0: the first stage of the unbuffered operation where the operation is initiated
     if (channel->unbuffered_stage == 0)
     {
         channel->unbuffered_stage = 1;
@@ -68,17 +69,21 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
         return SUCCESS;
 
     }
+    // stage 1: the second stage of the unbuffered operation where the operation is completed and one operation is already waiting to be completed
     else if(channel->unbuffered_stage == 1)
     {
-        if (channel->unbuffered_operation == UNBUFFERED_RECEIVE)
+        if (channel->unbuffered_operation != operation)
         {
-            data = channel->buffer->data;
+            if (operation == UNBUFFERED_RECEIVE )
+            {
+                data = channel->buffer->data;
+            }
+            else if (channel->unbuffered_operation == UNBUFFERED_SEND)
+            {
+                channel->buffer->data = data;
+            }
         }
-        else if (channel->unbuffered_operation == UNBUFFERED_SEND)
-        {
-            channel->buffer->data = data;
-        }
-
+       
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
             return GENERIC_ERROR;
