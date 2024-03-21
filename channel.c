@@ -56,6 +56,8 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
         //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
         channel->buffer->data = data;
 
+        pthread_cond_signal(&channel->cond_empty);
+
         //this condition is just used to block the thread until the second stage operation is completed
         pthread_cond_wait(&channel->cond_full, &channel->mutex); 
 
@@ -72,6 +74,12 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
     // stage 1: the second stage of the unbuffered operation where the operation is completed and one operation is already waiting to be completed
     else if(channel->unbuffered_stage == 1)
     {
+        // if the operation is the same as the operation that is already waiting to be completed that means it has to wait
+        while(channel->unbuffered_operation == operation)
+        {
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex); // this condition is just used to block the thread until an opposite operation is initiated
+        }
+        
         if (channel->unbuffered_operation != operation)
         {
             if (operation == UNBUFFERED_RECEIVE )
