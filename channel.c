@@ -45,6 +45,54 @@ void signal_semaphore_select(channel_t* channel)
     pthread_mutex_unlock(&channel->select_mutex);
 }
 
+enum channel_status unbuffered_sync(channel_t* channel, int operation, void* data)
+{
+    if (channel->unbuffered_stage == 0)
+    {
+        channel->unbuffered_stage = 1;
+        channel->unbuffered_operation = operation;
+
+        //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
+        channel->buffer->data = data;
+
+        //this condition is just used to block the thread until the second stage operation is completed
+        pthread_cond_wait(&channel->cond_full, &channel->mutex); 
+
+        channel->unbuffered_stage = 0;
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        return SUCCESS;
+
+    }
+    else if(channel->unbuffered_stage == 1)
+    {
+        if (channel->unbuffered_operation == UNBUFFERED_RECEIVE)
+        {
+            data = channel->buffer->data;
+        }
+        else if (channel->unbuffered_operation == UNBUFFERED_SEND)
+        {
+            channel->buffer->data = data;
+        }
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        pthread_cond_signal(&channel->cond_full);
+
+        return SUCCESS;
+        
+    }
+
+    return 0;
+}
+
 // Writes data to the given channel
 // This is a blocking call i.e., the function only returns on a successful completion of send
 // In case the channel is full, the function waits till the channel has space to write the new data
@@ -70,34 +118,8 @@ enum channel_status channel_send(channel_t *channel, void* data)
 
     if(channel->unbuffered)
     {
-        if (channel->unbuffered_stage == 0)
-        {
-            channel->unbuffered_stage = 1;
-            channel->unbuffered_operation = UNBUFFERED_SEND;  
-            channel->buffer->data = data;
-            pthread_cond_wait(&channel->cond_full, &channel->mutex);
-            channel->unbuffered_stage = 0;
-            if(pthread_mutex_unlock(&channel->mutex) != 0)
-            {
-                return GENERIC_ERROR;
-            }
-            return SUCCESS;
-            
-        }
-        else if(channel->unbuffered_stage == 1)
-        {
-            if(channel->unbuffered_operation == UNBUFFERED_RECEIVE)
-            {
-                channel->buffer->data = data;   
-                if(pthread_mutex_unlock(&channel->mutex) != 0)
-                {
-                    return GENERIC_ERROR;
-                }
-                pthread_cond_signal(&channel->cond_empty);
-                return SUCCESS;
-            }
-            
-        }
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, data);
+        return status;
     }
     else
     {
@@ -154,33 +176,8 @@ enum channel_status channel_receive(channel_t* channel, void** data)
 
     if(channel->unbuffered)
     {
-        if (channel->unbuffered_stage == 0)
-        {
-            channel->unbuffered_stage = 1;
-            channel->unbuffered_operation = UNBUFFERED_RECEIVE;
-            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
-            channel->unbuffered_stage = 0;
-            *data = channel->buffer->data;
-            if(pthread_mutex_unlock(&channel->mutex) != 0)
-            {
-                return GENERIC_ERROR;
-            }
-            return SUCCESS;
-        }
-        else if(channel->unbuffered_stage == 1)
-        {
-            if (channel->unbuffered_operation == UNBUFFERED_SEND)
-            {
-                *data = channel->buffer->data;
-                if(pthread_mutex_unlock(&channel->mutex) != 0)
-                {
-                    return GENERIC_ERROR;
-                }
-                pthread_cond_signal(&channel->cond_full);
-                return SUCCESS;
-            }
-     
-        }
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, *data);
+        return status;
     }
     else
     {
