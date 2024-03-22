@@ -45,20 +45,27 @@ void signal_semaphore_select(channel_t* channel)
     pthread_mutex_unlock(&channel->select_mutex);
 }
 
-enum channel_status unbuffered_sync(channel_t* channel, int operation, void* data)
+enum channel_status unbuffered_sync(channel_t* channel, int operation, void** data)
 {
+stage0:
     // stage 0: the first stage of the unbuffered operation where the operation is initiated
     if (channel->unbuffered_stage == 0)
     {
         channel->unbuffered_stage = 1;
         channel->unbuffered_operation = operation;
+        printf("operation: %d\n", operation);
 
+    
+        printf("data pointer in unbuffered channel initial: %p\n", data);
+
+    
         //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
         channel->buffer->data = data;
 
-        pthread_cond_signal(&channel->cond_empty);
-
+        printf("channel data pointer after assignment: %p\n", channel->buffer->data);
+        
         //this condition is just used to block the thread until the second stage operation is completed
+            
         pthread_cond_wait(&channel->cond_full, &channel->mutex); 
 
         channel->unbuffered_stage = 0;
@@ -68,6 +75,8 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
             return GENERIC_ERROR;
         }
 
+        pthread_cond_signal(&channel->cond_empty);
+
         return SUCCESS;
 
     }
@@ -75,23 +84,28 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
     else if(channel->unbuffered_stage == 1)
     {
         // if the operation is the same as the operation that is already waiting to be completed that means it has to wait
-        while(channel->unbuffered_operation == operation)
+        if(channel->unbuffered_operation == operation)
         {
-            pthread_cond_wait(&channel->cond_empty, &channel->mutex); // this condition is just used to block the thread until an opposite operation is initiated
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex); // this condition is just used to block the thread until the compatible first stage operation is completed
+            // go to stage 0 again
+            goto stage0;
         }
         
-        if (channel->unbuffered_operation != operation)
+        else if (channel->unbuffered_operation != operation)
         {
             if (operation == UNBUFFERED_RECEIVE )
             {
-                data = channel->buffer->data;
+                memmove(*data, *channel->buffer->data, sizeof(void*));
+                printf("Data received: %p\n", (char*)*data);
             }
-            else if (channel->unbuffered_operation == UNBUFFERED_SEND)
+            else if (operation == UNBUFFERED_SEND)
             {
-                channel->buffer->data = data;
+                *channel->buffer->data = malloc(sizeof(void*));
+                memmove(*channel->buffer->data, *data, sizeof(void*));
+                printf("Data sent: %s\n", (char*)*data);
             }
         }
-       
+
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
             return GENERIC_ERROR;
@@ -103,7 +117,7 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void* dat
         
     }
 
-    return 0;
+    return GENERIC_ERROR;
 }
 
 // Writes data to the given channel
@@ -131,7 +145,7 @@ enum channel_status channel_send(channel_t *channel, void* data)
 
     if(channel->unbuffered)
     {
-        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, data);
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
         return status;
     }
     else
@@ -189,7 +203,10 @@ enum channel_status channel_receive(channel_t* channel, void** data)
 
     if(channel->unbuffered)
     {
-        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, *data);
+        printf("pointer of data in recv initial: %p\n", data);
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, data);
+        printf("pointer of data in recv after: %p\n", data);
+        printf("Data received after: %s\n", (char *)*data); 
         return status;
     }
     else
