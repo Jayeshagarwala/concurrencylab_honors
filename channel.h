@@ -39,6 +39,9 @@ typedef struct {
     int unbuffered_operation;
     int unbuffered_stage;
     int unbuffered;
+    int send_waiting_count;
+    int recv_waiting_count;
+    void* data;
 } channel_t;
 
 // Defines channel list structure for channel_select function
