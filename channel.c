@@ -157,9 +157,11 @@ enum channel_status channel_send(channel_t *channel, void* data)
         channel->data = data;
         channel->send_waiting_count++;
 
+
         if (channel->recv_waiting_count > 0)
         {
             pthread_cond_signal(&channel->cond_empty);
+            channel->recv_waiting_count--;
         }
 
         pthread_cond_wait(&channel->cond_full, &channel->mutex);
@@ -231,7 +233,6 @@ enum channel_status channel_receive(channel_t* channel, void** data)
         {
             channel->recv_waiting_count++;
             pthread_cond_wait(&channel->cond_empty, &channel->mutex);
-            channel->recv_waiting_count--;
         }
 
         *data = channel->data;
@@ -314,9 +315,9 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
 
         }
         
-        channel->send_waiting_count++;
-
         channel->data = data;
+        channel->send_waiting_count++;
+        channel->recv_waiting_count--;
 
 
         pthread_cond_signal(&channel->cond_empty);
