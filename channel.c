@@ -17,6 +17,8 @@ channel_t* channel_create(size_t size)
     pthread_mutex_init(&channel->select_mutex, NULL);
     pthread_cond_init(&channel->cond_full, NULL);
     pthread_cond_init(&channel->cond_empty, NULL);
+    sem_init(&channel->sem_read, 0, 0);
+    sem_init(&channel->sem_write, 0, 0);
     
     channel->is_closed = false;
     channel->semaphore_select_list = list_create();
@@ -53,91 +55,7 @@ void signal_semaphore_select(channel_t* channel)
 
 enum channel_status unbuffered_sync(channel_t* channel, int operation, void** data)
 {
-stage0:
-    
-    // stage 0: the first stage of the unbuffered operation where the operation is initiated
-    if (channel->unbuffered_stage == 0)
-    {
-        channel->unbuffered_stage = 1;
-        channel->unbuffered_operation = operation;
-        printf("operation stage 0: %d\n", operation);
 
-        printf("data pointer in unbuffered channel initial: %p\n", data);
-
-        //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
-        channel->buffer->data = data;
-
-        printf("channel data pointer after assignment: %p\n", channel->buffer->data);
-        
-        //this condition is just used to block the thread until the second stage operation is completed    
-        
-        pthread_cond_wait(&channel->cond_full, &channel->mutex); 
-
-        channel->unbuffered_stage = 0;
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        pthread_cond_broadcast(&channel->cond_empty);
-
-        return SUCCESS;
-
-    }
-    // stage 1: the second stage of the unbuffered operation where the operation is completed and one operation is already waiting to be completed
-    else if(channel->unbuffered_stage == 1)
-    {
-        printf("operation stage 1: %d\n", operation);
-        // if the operation is the same as the operation that is already waiting to be completed that means it has to wait
-        if(channel->unbuffered_operation == operation)
-        {
-            printf("waiting pointer: %p\n", data);
-            // this condition is just used to block the thread until the compatible first stage operation is completed
-            pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
-            printf("woken up pointer: %p\n", data);
-            // go to stage 0 again
-            goto stage0;
-        }
-        
-        else if (channel->unbuffered_operation != operation)
-        {
-            if (operation == UNBUFFERED_RECEIVE)
-            {
-                *data = *channel->buffer->data;
-                printf("Data received: %p\n", (char*)*data);
-            }
-            else if (operation == UNBUFFERED_SEND)
-            {
-                *channel->buffer->data = malloc(sizeof(void*));
-                *channel->buffer->data = *data;
-                printf("Data sent: %s\n", (char*)*data);
-            }
-        }
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        pthread_cond_signal(&channel->cond_full);
-
-        return SUCCESS;
-        
-    }
-
-    return GENERIC_ERROR;
-}
-
-// Writes data to the given channel
-// This is a blocking call i.e., the function only returns on a successful completion of send
-// In case the channel is full, the function waits till the channel has space to write the new data
-// Returns SUCCESS for successfully writing data to the channel,
-// CLOSED_ERROR if the channel is closed, and
-// GENERIC_ERROR on encountering any other generic error of any sort
-enum channel_status channel_send(channel_t *channel, void* data)
-{
-    /* IMPLEMENT THIS */
     if(pthread_mutex_lock(&channel->mutex) != 0)
     {
         return GENERIC_ERROR;
@@ -152,19 +70,77 @@ enum channel_status channel_send(channel_t *channel, void* data)
         return CLOSED_ERROR;
     }
 
-    if(channel->unbuffered)
+    stage0:
+    
+
+    // stage 0: the first stage of the unbuffered operation where the operation is initiated
+    if (channel->unbuffered_stage == 0)
     {
+        /* IMPLEMENT THIS */
+        
+        channel->unbuffered_stage = 1;
+        channel->unbuffered_operation = operation;
+
+
+
+
+        //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
         channel->data = data;
-        channel->send_waiting_count++;
 
 
-        if (channel->recv_waiting_count > 0)
+        
+        //this condition is just used to block the thread until the second stage operation is completed    
+        
+        pthread_cond_wait(&channel->cond_full, &channel->mutex); 
+
+        channel->unbuffered_stage = 0;
+
+
+        pthread_cond_broadcast(&channel->cond_empty);
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
-            pthread_cond_signal(&channel->cond_empty);
-            channel->recv_waiting_count--;
+            return GENERIC_ERROR;
+        }
+        
+        return SUCCESS;
+
+    }
+    // stage 1: the second stage of the unbuffered operation where the operation is completed and one operation is already waiting to be completed
+    else if(channel->unbuffered_stage == 1)
+    {
+        /* IMPLEMENT THIS */
+
+        // if the operation is the same as the operation that is already waiting to be completed that means it has to wait
+        if(channel->unbuffered_operation == operation)
+        {
+
+            // this condition is just used to block the thread until the compatible first stage operation is completed
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
+
+            // go to stage 0 again
+            goto stage0;
+        }
+        
+        if (channel->unbuffered_operation != operation)
+        {
+            if (operation == UNBUFFERED_RECEIVE)
+            {
+                *data = *channel->data;
+
+            }
+            else if (operation == UNBUFFERED_SEND)
+            {
+                *channel->data = malloc(sizeof(void*));
+                *channel->data = *data;
+
+            }
         }
 
-        pthread_cond_wait(&channel->cond_full, &channel->mutex);
+        channel->unbuffered_stage = 2;
+
+        pthread_cond_signal(&channel->cond_full);
+        
 
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
@@ -172,10 +148,53 @@ enum channel_status channel_send(channel_t *channel, void* data)
         }
 
         return SUCCESS;
+        
+    }
+    else if(channel->unbuffered_stage == 2){
+
+        // this condition is just used to block the thread until the compatible first stage operation is completed
+        pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
+
+        // go to stage 0 again
+        goto stage0;
+}
+
+    return GENERIC_ERROR;
+}
+
+// Writes data to the given channel
+// This is a blocking call i.e., the function only returns on a successful completion of send
+// In case the channel is full, the function waits till the channel has space to write the new data
+// Returns SUCCESS for successfully writing data to the channel,
+// CLOSED_ERROR if the channel is closed, and
+// GENERIC_ERROR on encountering any other generic error of any sort
+enum channel_status channel_send(channel_t *channel, void* data)
+{
+    
+
+    if(channel->unbuffered)
+    {
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
+
+        return status;
 
     }
     else
-    {
+        {
+            /* IMPLEMENT THIS */
+        if(pthread_mutex_lock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        if(channel->is_closed)
+        {
+            if(pthread_mutex_unlock(&channel->mutex) != 0)
+            {
+                return GENERIC_ERROR;
+            }
+            return CLOSED_ERROR;
+        }
 
         while(buffer_add(channel->buffer, data) == BUFFER_ERROR)
         {
@@ -213,44 +232,29 @@ enum channel_status channel_receive(channel_t* channel, void** data)
 {
     /* IMPLEMENT THIS */
 
-    if(pthread_mutex_lock(&channel->mutex) != 0)
-    {
-        return GENERIC_ERROR;
-    }
-
-    if(channel->is_closed)
-    {
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-        return CLOSED_ERROR;
-    }
 
     if(channel->unbuffered)
     {
-        while(channel->send_waiting_count == 0)
-        {
-            channel->recv_waiting_count++;
-            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
-        }
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, data);
 
-        *data = channel->data;
-
-        channel->send_waiting_count--;
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        pthread_cond_signal(&channel->cond_full);
-
-        return SUCCESS;
+        return status;
 
     }
     else
     {
+        if(pthread_mutex_lock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        if(channel->is_closed)
+        {
+            if(pthread_mutex_unlock(&channel->mutex) != 0)
+            {
+                return GENERIC_ERROR;
+            }
+            return CLOSED_ERROR;
+        }
         while(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
         {
 
