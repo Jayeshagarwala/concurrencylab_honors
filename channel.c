@@ -119,7 +119,6 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         channel->unbuffered_stage = 2;
 
         pthread_cond_signal(&channel->cond_full);
-        
 
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
@@ -300,12 +299,20 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
             printf("channel full\n");
             return CHANNEL_FULL;
         }
-        printf("channel non blocking send\n");
-        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
 
-        return status;
+        *channel->data = data;
 
-       
+        channel->unbuffered_stage = 2;
+
+        pthread_cond_signal(&channel->cond_full);
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        return SUCCESS;
+
     }
 
     else{
@@ -372,9 +379,18 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
         }
         printf("channel non blocking receive\n");
 
-        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, data);
+        *data = *channel->data;
 
-        return status;
+        channel->unbuffered_stage = 2;
+
+        pthread_cond_signal(&channel->cond_full);
+
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+
+        return SUCCESS;
         
     }
 
