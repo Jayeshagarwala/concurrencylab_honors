@@ -114,6 +114,7 @@ list_node_t* list_insert(list_t* list, void* data)
     if (list->head == NULL) {
         list->head = new_node;
         list->tail = new_node;
+        list->count++;
         return new_node;
     }
     list->tail->next = new_node;

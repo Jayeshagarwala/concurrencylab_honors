@@ -19,7 +19,8 @@ channel_t* channel_create(size_t size)
     pthread_cond_init(&channel->cond_empty, NULL);
 
     channel->is_closed = false;
-    channel->semaphore_select_list = list_create();
+    channel->semaphore_select_list_send = list_create();
+    channel->semaphore_select_list_recv = list_create();
     channel->unbuffered_operation = NO_UNBUFFERED_OPERATION;
     channel->unbuffered_stage = 0;
     channel->unbuffered = (size == 0) ? UNBUFFERED : BUFFERED;
@@ -28,17 +29,35 @@ channel_t* channel_create(size_t size)
     }
     channel->data = NULL;
 
+    channel->select_send_waiting = 0;
+    channel->select_recv_waiting = 0;
+
     return channel;
 }
 
 // Signal all the semaphores in the select list
 // This function is called whenever a send or receive operation is successful
 // This function is also called when the channel is closed
-void signal_semaphore_select(channel_t* channel)
+void signal_semaphore_select_send(channel_t* channel)
 {
     pthread_mutex_lock(&channel->select_mutex);
 
-    list_node_t* node = list_head(channel->semaphore_select_list);
+    list_node_t* node = list_head(channel->semaphore_select_list_send);
+
+    while (node != NULL)
+    {
+        sem_post((sem_t*)node->data);
+        node = node->next;
+    }
+        
+    pthread_mutex_unlock(&channel->select_mutex);
+}
+
+void signal_semaphore_select_recv(channel_t* channel)
+{
+    pthread_mutex_lock(&channel->select_mutex);
+
+    list_node_t* node = list_head(channel->semaphore_select_list_recv);
 
     while (node != NULL)
     {
@@ -65,6 +84,15 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
 
         //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
         channel->data = data;
+
+        if (operation == UNBUFFERED_SEND)
+        {
+            signal_semaphore_select_recv(channel);
+        }
+        else if (operation == UNBUFFERED_RECEIVE)
+        {
+            signal_semaphore_select_send(channel);
+        }
 
         //this condition is just used to block the thread until the second stage operation is completed    
         pthread_cond_wait(&channel->cond_full, &channel->mutex); 
@@ -195,7 +223,7 @@ enum channel_status channel_send(channel_t *channel, void* data)
             return GENERIC_ERROR;
         }
 
-        signal_semaphore_select(channel);
+        signal_semaphore_select_recv(channel);
         pthread_cond_signal(&channel->cond_empty);
         
         return SUCCESS;
@@ -257,13 +285,46 @@ enum channel_status channel_receive(channel_t* channel, void** data)
             return GENERIC_ERROR;
         }
 
-        signal_semaphore_select(channel);
+        signal_semaphore_select_send(channel);
         pthread_cond_signal(&channel->cond_full);
 
         return SUCCESS;
     }
     return GENERIC_ERROR;
 }
+
+// Checks if there is a send operation waiting in the select list
+bool send_waiting_in_select(channel_t* channel)
+{
+    pthread_mutex_lock(&channel->select_mutex);
+
+    if(list_count(channel->semaphore_select_list_send) > 0)
+    {
+        pthread_mutex_unlock(&channel->select_mutex);
+        return true;
+    }
+
+    pthread_mutex_unlock(&channel->select_mutex);
+
+    return false;
+}
+
+// Checks if there is a send operation waiting in the select list
+bool recv_waiting_in_select(channel_t* channel)
+{
+    pthread_mutex_lock(&channel->select_mutex);
+
+    if(list_count(channel->semaphore_select_list_recv) > 0)
+    {
+        pthread_mutex_unlock(&channel->select_mutex);
+        return true;
+    }
+
+    pthread_mutex_unlock(&channel->select_mutex);
+
+    return false;
+}
+
 
 // Writes data to the given channel
 // This is a non-blocking call i.e., the function simply returns if the channel is full
@@ -290,7 +351,13 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
     }
 
     if (channel->unbuffered){
-        if (channel->unbuffered_stage != 1 || channel->unbuffered_operation != UNBUFFERED_RECEIVE)
+        if ((channel->unbuffered_stage == 1 && channel->unbuffered_operation == UNBUFFERED_RECEIVE) || recv_waiting_in_select(channel) == true)
+        {
+            enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
+            return status;
+            
+        }
+        else
         {
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
@@ -299,19 +366,6 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
             printf("channel full\n");
             return CHANNEL_FULL;
         }
-
-        *channel->data = data;
-
-        channel->unbuffered_stage = 2;
-
-        pthread_cond_signal(&channel->cond_full);
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        return SUCCESS;
 
     }
 
@@ -331,7 +385,7 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
             return GENERIC_ERROR;
         }
 
-        signal_semaphore_select(channel);
+        signal_semaphore_select_recv(channel);
         pthread_cond_signal(&channel->cond_empty);
         
 
@@ -368,7 +422,12 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
 
     if (channel->unbuffered)
     {
-        if (channel->unbuffered_stage != 1 || channel->unbuffered_operation != UNBUFFERED_SEND)
+        if((channel->unbuffered_stage == 1 && channel->unbuffered_operation == UNBUFFERED_SEND) || send_waiting_in_select(channel) == true)
+        {
+            enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, data);
+            return status;
+        }
+        else
         {
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
@@ -377,24 +436,11 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
             printf("channel empty\n");
             return CHANNEL_EMPTY;
         }
-        printf("channel non blocking receive\n");
-
-        *data = *channel->data;
-
-        channel->unbuffered_stage = 2;
-
-        pthread_cond_signal(&channel->cond_full);
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        return SUCCESS;
         
     }
 
     else{
+        printf("channel non blocking receive\n");
 
         if(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
         {
@@ -410,7 +456,7 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
             return GENERIC_ERROR;
         }
 
-        signal_semaphore_select(channel);
+        signal_semaphore_select_send(channel);
         pthread_cond_signal(&channel->cond_full);
         
         return SUCCESS;
@@ -451,7 +497,8 @@ enum channel_status channel_close(channel_t* channel)
         return GENERIC_ERROR;
     }
 
-    signal_semaphore_select(channel);
+    signal_semaphore_select_recv(channel);
+    signal_semaphore_select_send(channel);
     pthread_cond_broadcast(&channel->cond_empty);
     pthread_cond_broadcast(&channel->cond_full);
 
@@ -480,28 +527,48 @@ enum channel_status channel_destroy(channel_t* channel)
     {
         buffer_free(channel->buffer);
     }
-    list_destroy(channel->semaphore_select_list);
+    list_destroy(channel->semaphore_select_list_send);
+    list_destroy(channel->semaphore_select_list_recv);
     free(channel);
 
     return SUCCESS;
 }
 
 // Add a semaphore to the select list
-void add_semaphore_select_list(channel_t* channel, sem_t* semaphore)
+void add_semaphore_select_list_send(channel_t* channel, sem_t* semaphore)
 {
     pthread_mutex_lock(&channel->select_mutex);
 
-    list_insert(channel->semaphore_select_list, semaphore);
+    list_insert(channel->semaphore_select_list_send, semaphore);
+
+    pthread_mutex_unlock(&channel->select_mutex);
+}
+// Add a semaphore to the select list
+void add_semaphore_select_list_recv(channel_t* channel, sem_t* semaphore)
+{
+    pthread_mutex_lock(&channel->select_mutex);
+
+    list_insert(channel->semaphore_select_list_recv, semaphore);
 
     pthread_mutex_unlock(&channel->select_mutex);
 }
 
 // Remove a semaphore from the select list
-void remove_semaphore_select_list(channel_t* channel, sem_t* semaphore)
+void remove_semaphore_select_list_send(channel_t* channel, sem_t* semaphore)
 {
     pthread_mutex_lock(&channel->select_mutex);
 
-    list_remove(channel->semaphore_select_list, list_find(channel->semaphore_select_list, semaphore));
+    list_remove(channel->semaphore_select_list_send, list_find(channel->semaphore_select_list_send, semaphore));
+
+    pthread_mutex_unlock(&channel->select_mutex);
+}
+
+// Remove a semaphore from the select list
+void remove_semaphore_select_list_recv(channel_t* channel, sem_t* semaphore)
+{
+    pthread_mutex_lock(&channel->select_mutex);
+
+    list_remove(channel->semaphore_select_list_recv, list_find(channel->semaphore_select_list_recv, semaphore));
 
     pthread_mutex_unlock(&channel->select_mutex);
 }
@@ -511,7 +578,14 @@ void cleanup_semaphore_select(select_t* channel_list, size_t channel_count, sem_
 {
     for (size_t i = 0; i < channel_count; i++)
     {
-        remove_semaphore_select_list(channel_list[i].channel, semaphore);
+        if (channel_list[i].dir == SEND)
+        {
+            remove_semaphore_select_list_send(channel_list[i].channel, semaphore);
+        }
+        else if (channel_list[i].dir == RECV)
+        {
+            remove_semaphore_select_list_recv(channel_list[i].channel, semaphore);
+        }
     }
 }
 
@@ -520,7 +594,14 @@ void init_semaphore_select(select_t* channel_list, size_t channel_count, sem_t* 
 {
     for (size_t i = 0; i < channel_count; i++)
     {
-        add_semaphore_select_list(channel_list[i].channel, semaphore);
+        if (channel_list[i].dir == SEND)
+        {
+            add_semaphore_select_list_send(channel_list[i].channel, semaphore);
+        }
+        else if (channel_list[i].dir == RECV)
+        {
+            add_semaphore_select_list_recv(channel_list[i].channel, semaphore);
+        }
     }
 }
 
@@ -592,6 +673,7 @@ enum channel_status channel_select(select_t* channel_list, size_t channel_count,
 
                     return status;
                 }
+
             }
             // if the operation is receive
             else if (channel_list[i].dir == RECV)
@@ -613,9 +695,10 @@ enum channel_status channel_select(select_t* channel_list, size_t channel_count,
 
                     return status;
                 }
+
             }
         }
-
+        printf("waiting\n");
         // If no channel is available, the call is blocked and waits till it finds a channel which supports its required operation
         sem_wait(&semaphore);
     
