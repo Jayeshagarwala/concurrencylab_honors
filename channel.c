@@ -17,9 +17,7 @@ channel_t* channel_create(size_t size)
     pthread_mutex_init(&channel->select_mutex, NULL);
     pthread_cond_init(&channel->cond_full, NULL);
     pthread_cond_init(&channel->cond_empty, NULL);
-    sem_init(&channel->sem_read, 0, 0);
-    sem_init(&channel->sem_write, 0, 0);
-    
+
     channel->is_closed = false;
     channel->semaphore_select_list = list_create();
     channel->unbuffered_operation = NO_UNBUFFERED_OPERATION;
@@ -28,8 +26,6 @@ channel_t* channel_create(size_t size)
     if (!channel->unbuffered){
         channel->buffer = buffer_create(size);
     }
-    channel->send_waiting_count = 0;
-    channel->recv_waiting_count = 0;
     channel->data = NULL;
 
     return channel;
@@ -56,45 +52,24 @@ void signal_semaphore_select(channel_t* channel)
 enum channel_status unbuffered_sync(channel_t* channel, int operation, void** data)
 {
 
-    if(pthread_mutex_lock(&channel->mutex) != 0)
-    {
-        return GENERIC_ERROR;
-    }
-
-    if(channel->is_closed)
-    {
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-        return CLOSED_ERROR;
-    }
-
     stage0:
     
-
     // stage 0: the first stage of the unbuffered operation where the operation is initiated
     if (channel->unbuffered_stage == 0)
     {
         /* IMPLEMENT THIS */
-        
+        printf("stage 0\n");
+        printf("operation: %d\n", operation);
         channel->unbuffered_stage = 1;
         channel->unbuffered_operation = operation;
-
-
-
 
         //this data is used to store the data to be sent or received in the second stage of the unbuffered operation
         channel->data = data;
 
-
-        
         //this condition is just used to block the thread until the second stage operation is completed    
-        
         pthread_cond_wait(&channel->cond_full, &channel->mutex); 
 
         channel->unbuffered_stage = 0;
-
 
         pthread_cond_broadcast(&channel->cond_empty);
 
@@ -110,17 +85,23 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
     else if(channel->unbuffered_stage == 1)
     {
         /* IMPLEMENT THIS */
+        printf("stage 1\n");
 
         // if the operation is the same as the operation that is already waiting to be completed that means it has to wait
         if(channel->unbuffered_operation == operation)
         {
+            printf("entered waiting\n");
 
             // this condition is just used to block the thread until the compatible first stage operation is completed
             pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
 
+            printf("exited waiting\n");
+
             // go to stage 0 again
             goto stage0;
         }
+
+        printf("executing\n ");
         
         if (channel->unbuffered_operation != operation)
         {
@@ -130,10 +111,8 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
 
             }
             else if (operation == UNBUFFERED_SEND)
-            {
-                *channel->data = malloc(sizeof(void*));
+            {   
                 *channel->data = *data;
-
             }
         }
 
@@ -151,9 +130,13 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         
     }
     else if(channel->unbuffered_stage == 2){
+        printf("stage 2\n");
+        printf("entered waiting\n");
 
         // this condition is just used to block the thread until the compatible first stage operation is completed
         pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
+
+        printf("exited waiting\n");
 
         // go to stage 0 again
         goto stage0;
@@ -170,8 +153,20 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
 // GENERIC_ERROR on encountering any other generic error of any sort
 enum channel_status channel_send(channel_t *channel, void* data)
 {
-    
+    if(pthread_mutex_lock(&channel->mutex) != 0)
+    {
+        return GENERIC_ERROR;
+    }
 
+    if(channel->is_closed)
+    {
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+        return CLOSED_ERROR;
+    }
+    
     if(channel->unbuffered)
     {
         enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
@@ -180,21 +175,8 @@ enum channel_status channel_send(channel_t *channel, void* data)
 
     }
     else
-        {
-            /* IMPLEMENT THIS */
-        if(pthread_mutex_lock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        if(channel->is_closed)
-        {
-            if(pthread_mutex_unlock(&channel->mutex) != 0)
-            {
-                return GENERIC_ERROR;
-            }
-            return CLOSED_ERROR;
-        }
+    {
+        /* IMPLEMENT THIS */
 
         while(buffer_add(channel->buffer, data) == BUFFER_ERROR)
         {
@@ -232,6 +214,19 @@ enum channel_status channel_receive(channel_t* channel, void** data)
 {
     /* IMPLEMENT THIS */
 
+    if(pthread_mutex_lock(&channel->mutex) != 0)
+    {
+        return GENERIC_ERROR;
+    }
+
+    if(channel->is_closed)
+    {
+        if(pthread_mutex_unlock(&channel->mutex) != 0)
+        {
+            return GENERIC_ERROR;
+        }
+        return CLOSED_ERROR;
+    }
 
     if(channel->unbuffered)
     {
@@ -242,19 +237,7 @@ enum channel_status channel_receive(channel_t* channel, void** data)
     }
     else
     {
-        if(pthread_mutex_lock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        if(channel->is_closed)
-        {
-            if(pthread_mutex_unlock(&channel->mutex) != 0)
-            {
-                return GENERIC_ERROR;
-            }
-            return CLOSED_ERROR;
-        }
+        /* IMPLEMENT THIS */
         while(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
         {
 
@@ -308,33 +291,21 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
     }
 
     if (channel->unbuffered){
-
-        if(channel->recv_waiting_count < 1){
-
+        if (channel->unbuffered_stage != 1 || channel->unbuffered_operation != UNBUFFERED_RECEIVE)
+        {
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
                 return GENERIC_ERROR;
             }
+            printf("channel full\n");
             return CHANNEL_FULL;
-
         }
-        
-        channel->data = data;
-        channel->send_waiting_count++;
-        channel->recv_waiting_count--;
+        printf("channel non blocking send\n");
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
 
+        return status;
 
-        pthread_cond_signal(&channel->cond_empty);
-
-        pthread_cond_wait(&channel->cond_full, &channel->mutex);
-
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        return SUCCESS;
-
+       
     }
 
     else{
@@ -390,26 +361,20 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
 
     if (channel->unbuffered)
     {
-        if(channel->send_waiting_count < 1)
+        if (channel->unbuffered_stage != 1 || channel->unbuffered_operation != UNBUFFERED_SEND)
         {
             if(pthread_mutex_unlock(&channel->mutex) != 0)
             {
                 return GENERIC_ERROR;
             }
+            printf("channel empty\n");
             return CHANNEL_EMPTY;
         }
+        printf("channel non blocking receive\n");
 
-        *data = channel->data;
-        channel->send_waiting_count--;
+        enum channel_status status = unbuffered_sync(channel, UNBUFFERED_RECEIVE, data);
 
-        if(pthread_mutex_unlock(&channel->mutex) != 0)
-        {
-            return GENERIC_ERROR;
-        }
-
-        pthread_cond_signal(&channel->cond_full);
-
-        return SUCCESS;
+        return status;
         
     }
 

@@ -42,8 +42,6 @@ typedef struct {
     int send_waiting_count;
     int recv_waiting_count;
     void** data;
-    sem_t sem_read;
-    sem_t sem_write;
 } channel_t;
 
 // Defines channel list structure for channel_select function
