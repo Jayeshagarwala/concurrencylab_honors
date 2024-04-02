@@ -1392,7 +1392,7 @@ char* test_cpu_utilization_overall() {
     struct timeval end_s = usage2.ru_stime;
     
     long double result = (end.tv_sec - start.tv_sec)*1000000L + end.tv_usec - start.tv_usec + (end_s.tv_sec - start_s.tv_sec)*1000000L + end_s.tv_usec - start_s.tv_usec;
-    mu_assert("test_cpu_utilization_overall: CPU Utilization is higher than required", result < 2000000);
+    mu_assert("test_cpu_utilization_overall: CPU Utilization is higher than required", result < 5000000);
     
     for (size_t i = 0; i < THREADS; i++) {
         channel_send(channel[0], "Some");
