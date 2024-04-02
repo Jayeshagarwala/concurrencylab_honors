@@ -17,6 +17,8 @@ channel_t* channel_create(size_t size)
     pthread_mutex_init(&channel->select_mutex, NULL);
     pthread_cond_init(&channel->cond_full, NULL);
     pthread_cond_init(&channel->cond_empty, NULL);
+    pthread_cond_init(&channel->cond_waiting_stage, NULL);
+    pthread_cond_init(&channel->cond_completed_stage, NULL);
 
     channel->is_closed = false;
     channel->semaphore_select_list_send = list_create();
@@ -29,8 +31,8 @@ channel_t* channel_create(size_t size)
     }
     channel->data = NULL;
 
-    channel->select_send_waiting = 0;
-    channel->select_recv_waiting = 0;
+    channel->send_waiting = 0;
+    channel->recv_waiting = 0;
 
     return channel;
 }
@@ -82,6 +84,7 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
     // stage 1: the first stage of the unbuffered operation where the operation is initiated
     if (channel->unbuffered_stage == 0)
     {
+
         /* IMPLEMENT THIS */
         channel->unbuffered_stage = 1;
         channel->unbuffered_operation = operation;
@@ -93,19 +96,21 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         if (operation == UNBUFFERED_SEND)
         {
             signal_semaphore_select_recv(channel);
+            pthread_cond_broadcast(&channel->cond_empty);
         }
         else if (operation == UNBUFFERED_RECEIVE)
         {
             signal_semaphore_select_send(channel);
+            pthread_cond_broadcast(&channel->cond_full);
         }
 
         //this condition is just used to block the thread until the second stage operation is completed    
-        pthread_cond_wait(&channel->cond_full, &channel->mutex); 
+        pthread_cond_wait(&channel->cond_completed_stage, &channel->mutex); 
 
         channel->unbuffered_stage = 0;
 
         // signal the operations waiting in stage 2 that the operation is completed and they can proceed with stage 1 again
-        pthread_cond_broadcast(&channel->cond_empty);
+        pthread_cond_broadcast(&channel->cond_waiting_stage);
 
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
@@ -124,8 +129,26 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         if(channel->unbuffered_operation == operation)
         {
 
+            if(operation == UNBUFFERED_SEND)
+            {
+                channel->send_waiting++;
+            }
+            else if(operation == UNBUFFERED_RECEIVE)
+            {
+                channel->recv_waiting++;
+            }
+
             // this condition is just used to block the thread until the compatible first stage operation is completed
-            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
+            pthread_cond_wait(&channel->cond_waiting_stage, &channel->mutex);
+
+            if(operation == UNBUFFERED_SEND)
+            {
+                channel->send_waiting--;
+            }
+            else if(operation == UNBUFFERED_RECEIVE)
+            {
+                channel->recv_waiting--;
+            }
 
             // go to stage 0 again
             goto stage0;
@@ -148,7 +171,7 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         // this is a preventive measure to avoid any operation interfering with stage 1 or 2 while other operation is still in progress
         // this will allow any interfering operation to go directly to wait stage 3 if it interfered between cond_full is signaled and stage 1 grabs the locks again
         channel->unbuffered_stage = 2;
-        pthread_cond_signal(&channel->cond_full);
+        pthread_cond_signal(&channel->cond_completed_stage);
 
         if(pthread_mutex_unlock(&channel->mutex) != 0)
         {
@@ -161,8 +184,26 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
     // stage 3: the third stage of the unbuffered operation where the operation is waiting for existing operation to complete
     else if(channel->unbuffered_stage == 2){
 
+        if(operation == UNBUFFERED_SEND)
+        {
+            channel->send_waiting++;
+        }
+        else if(operation == UNBUFFERED_RECEIVE)
+        {
+            channel->recv_waiting++;
+        }
+
         // this condition is just used to block the thread until the compatible first stage operation is completed
-        pthread_cond_wait(&channel->cond_empty, &channel->mutex); 
+        pthread_cond_wait(&channel->cond_waiting_stage, &channel->mutex); 
+        
+        if(operation == UNBUFFERED_SEND)
+        {
+            channel->send_waiting--;
+        }
+        else if(operation == UNBUFFERED_RECEIVE)
+        {
+            channel->recv_waiting--;
+        }
 
         // go to stage 0 again
         goto stage0;
@@ -199,7 +240,6 @@ enum channel_status channel_send(channel_t *channel, void* data)
         enum channel_status status = unbuffered_sync(channel, UNBUFFERED_SEND, &data);
 
         return status;
-
     }
 
     // if the channel is buffered
@@ -359,7 +399,11 @@ enum channel_status channel_non_blocking_send(channel_t* channel, void* data)
 
     // if the channel is unbuffered
     if (channel->unbuffered){
-
+        // if the recv operation is waiting in stage 2 or 3, then wait for the operation to reach stage 1
+        while(channel->recv_waiting > 0 && channel->unbuffered_stage == 0 && recv_waiting_in_select(channel) == false)
+        {
+            pthread_cond_wait(&channel->cond_full, &channel->mutex);
+        }
         // if the recv operation is waiting in stage 1 or in select list, then complete the operation
         if ((channel->unbuffered_stage == 1 && channel->unbuffered_operation == UNBUFFERED_RECEIVE) || recv_waiting_in_select(channel) == true)
         {
@@ -433,6 +477,11 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
     // if the channel is unbuffered
     if (channel->unbuffered)
     {
+        // if send operation is waiting in stage 2 or 3, then wait for the operation to reach stage 1
+        while(channel->send_waiting > 0 && channel->unbuffered_stage == 0 && recv_waiting_in_select(channel) == false)
+        {
+            pthread_cond_wait(&channel->cond_empty, &channel->mutex);
+        }
         // if the send operation is waiting in stage 1 or in select list, then complete the operation
         if((channel->unbuffered_stage == 1 && channel->unbuffered_operation == UNBUFFERED_SEND) || send_waiting_in_select(channel) == true)
         {
@@ -453,7 +502,6 @@ enum channel_status channel_non_blocking_receive(channel_t* channel, void** data
 
     // if the channel is buffered
     else{
-        printf("channel non blocking receive\n");
 
         if(buffer_remove(channel->buffer, data) == BUFFER_ERROR)
         {
@@ -514,6 +562,8 @@ enum channel_status channel_close(channel_t* channel)
     signal_semaphore_select_send(channel);
     pthread_cond_broadcast(&channel->cond_empty);
     pthread_cond_broadcast(&channel->cond_full);
+    pthread_cond_broadcast(&channel->cond_waiting_stage);
+    pthread_cond_broadcast(&channel->cond_completed_stage);
 
     return SUCCESS;
 }
@@ -534,6 +584,8 @@ enum channel_status channel_destroy(channel_t* channel)
 
     pthread_cond_destroy(&channel->cond_full);
     pthread_cond_destroy(&channel->cond_empty);
+    pthread_cond_destroy(&channel->cond_waiting_stage);
+    pthread_cond_destroy(&channel->cond_completed_stage);
     pthread_mutex_destroy(&channel->mutex);
     pthread_mutex_destroy(&channel->select_mutex);
     if (!channel->unbuffered)
