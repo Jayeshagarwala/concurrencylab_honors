@@ -93,6 +93,7 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
         channel->data = data;
 
         // signal the semaphore of the opposite operation in select list that the operation is initiated
+        // signal the non-blocking operation that the opposite operation is available to proceed
         if (operation == UNBUFFERED_SEND)
         {
             signal_semaphore_select_recv(channel);
@@ -195,7 +196,7 @@ enum channel_status unbuffered_sync(channel_t* channel, int operation, void** da
 
         // this condition is just used to block the thread until the compatible first stage operation is completed
         pthread_cond_wait(&channel->cond_waiting_stage, &channel->mutex); 
-        
+
         if(operation == UNBUFFERED_SEND)
         {
             channel->send_waiting--;
@@ -722,43 +723,126 @@ enum channel_status channel_select(select_t* channel_list, size_t channel_count,
             // if the operation is send
             if (channel_list[i].dir == SEND)
             {
-                enum channel_status status = channel_non_blocking_send(channel_list[i].channel, channel_list[i].data);
-                if (status != CHANNEL_FULL)
-                {
-                    *selected_index = i;
+                // if the channel is unbuffered
+                if (channel_list[i].channel->unbuffered){
+                    if(pthread_mutex_lock(&channel_list[i].channel->mutex) != 0)
+                    {
+                        return GENERIC_ERROR;
+                    }
+                    if (channel_list[i].channel->is_closed)
+                    {
+                        if(pthread_mutex_unlock(&channel_list[i].channel->mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+                        return CLOSED_ERROR;
+                    }
+                    // if the receive operation is waiting in stage 1 or in select list of receive operation, then complete the operation
+                    if((channel_list[i].channel->unbuffered_stage == 1 && channel_list[i].channel->unbuffered_operation == UNBUFFERED_RECEIVE) || recv_waiting_in_select(channel_list[i].channel) == true)
+                    {
+                        enum channel_status status = unbuffered_sync(channel_list[i].channel, UNBUFFERED_SEND, &channel_list[i].data);
+                        *selected_index = i;
 
-                    cleanup_semaphore_select(channel_list, channel_count, &semaphore);
+                        cleanup_semaphore_select(channel_list, channel_count, &semaphore);
 
-                    if(pthread_mutex_unlock(&mutex) != 0)
+                        if(pthread_mutex_unlock(&mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+
+                        sem_destroy(&semaphore);
+                        pthread_mutex_destroy(&mutex);
+
+                        return status;
+                    }
+                    if(pthread_mutex_unlock(&channel_list[i].channel->mutex) != 0)
                     {
                         return GENERIC_ERROR;
                     }
 
-                    sem_destroy(&semaphore);
-                    pthread_mutex_destroy(&mutex);
+                }
+                // if the channel is buffered
+                else{
+                    enum channel_status status = channel_non_blocking_send(channel_list[i].channel, channel_list[i].data);
+                    if (status != CHANNEL_FULL)
+                    {
+                        *selected_index = i;
 
-                    return status;
+                        cleanup_semaphore_select(channel_list, channel_count, &semaphore);
+
+                        if(pthread_mutex_unlock(&mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+
+                        sem_destroy(&semaphore);
+                        pthread_mutex_destroy(&mutex);
+
+                        return status;
+                    }
                 }
             }
             // if the operation is receive
             else if (channel_list[i].dir == RECV)
             {
-                enum channel_status status = channel_non_blocking_receive(channel_list[i].channel, &channel_list[i].data);
-                if (status != CHANNEL_EMPTY)
-                {
-                    *selected_index = i;
-                    
-                    cleanup_semaphore_select(channel_list, channel_count, &semaphore);
-
-                    if(pthread_mutex_unlock(&mutex) != 0)
+                // if the channel is unbuffered
+                if (channel_list[i].channel->unbuffered){
+                    if(pthread_mutex_lock(&channel_list[i].channel->mutex) != 0)
                     {
                         return GENERIC_ERROR;
                     }
+                    if (channel_list[i].channel->is_closed)
+                    {
+                        if(pthread_mutex_unlock(&channel_list[i].channel->mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+                        return CLOSED_ERROR;
+                    }
 
-                    sem_destroy(&semaphore);
-                    pthread_mutex_destroy(&mutex);
+                    // // if the send operation is waiting in stage 1 or in select list of send operation, then complete the operation
+                    if((channel_list[i].channel->unbuffered_stage == 1 && channel_list[i].channel->unbuffered_operation == UNBUFFERED_SEND) || send_waiting_in_select(channel_list[i].channel) == true)
+                    {
+                        enum channel_status status = unbuffered_sync(channel_list[i].channel, UNBUFFERED_RECEIVE, &channel_list[i].data);
 
-                    return status;
+                        *selected_index = i;
+
+                        cleanup_semaphore_select(channel_list, channel_count, &semaphore);
+
+                        if(pthread_mutex_unlock(&mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+
+                        sem_destroy(&semaphore);
+                        pthread_mutex_destroy(&mutex);
+
+                        return status;
+                    }
+                    if(pthread_mutex_unlock(&channel_list[i].channel->mutex) != 0)
+                    {
+                        return GENERIC_ERROR;
+                    }
+                }
+                // if the channel is buffered
+                else{
+                    enum channel_status status = channel_non_blocking_receive(channel_list[i].channel, &channel_list[i].data);
+                    if (status != CHANNEL_EMPTY)
+                    {
+                        *selected_index = i;
+                        
+                        cleanup_semaphore_select(channel_list, channel_count, &semaphore);
+
+                        if(pthread_mutex_unlock(&mutex) != 0)
+                        {
+                            return GENERIC_ERROR;
+                        }
+
+                        sem_destroy(&semaphore);
+                        pthread_mutex_destroy(&mutex);
+
+                        return status;
+                    }
                 }
             }
         }
